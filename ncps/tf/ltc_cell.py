@@ -16,6 +16,9 @@ from ncps import wirings
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Union
+import ncps
+
+
 
 
 @tf.keras.utils.register_keras_serializable(package="ncps", name="LTCCell")
@@ -111,11 +114,28 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
 
     @property
     def motor_size(self):
-        return self._wiring.output_dim
+        
+        if isinstance(self._wiring.output_dim, ncps.tf.ltc_cell.LTCCell):
+            return list(self.findkeys(self._wiring.output_dim.get_config(),'output_dim'))[-1]
+        else:
+            return self._wiring.output_dim
 
     @property
     def output_size(self):
         return self.motor_size
+        
+        
+    def findkeys(self,node, kv):
+        if isinstance(node, list):
+            for i in node:
+                for x in findkeys(i, kv):
+                    yield x
+        elif isinstance(node, dict):
+            if kv in node:
+                yield node[kv]
+            for j in node.values():
+                for x in findkeys(j, kv):
+                    yield x
 
     def _get_initializer(self, param_name):
         minval, maxval = self._init_ranges[param_name]
@@ -332,7 +352,7 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
         outputs = self._map_outputs(next_state)
 
         return outputs, [next_state]
-
+    """
     def get_config(self):
         seralized = self._wiring.get_config()
         seralized["input_mapping"] = self._input_mapping
@@ -344,4 +364,21 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
     @classmethod
     def from_config(cls, config):
         wiring = wirings.Wiring.from_config(config)
+        return cls(wiring=wiring, **config)
+        
+    """        
+    def get_config(self):
+        config = {
+            "wiring": tf.keras.utils.serialize_keras_object(self._wiring),
+            "input_mapping": self._input_mapping,
+            "output_mapping": self._output_mapping,
+            "ode_unfolds": self._ode_unfolds,
+            "epsilon": self._epsilon,
+        }
+        base_config = super().get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+    @classmethod
+    def from_config(cls, config):
+        wiring = tf.keras.utils.deserialize_keras_object(config.pop("wiring"))
         return cls(wiring=wiring, **config)
