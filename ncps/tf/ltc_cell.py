@@ -16,10 +16,7 @@ from ncps import wirings
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Union
-import ncps
-
-
-
+from pprint import pprint
 
 @tf.keras.utils.register_keras_serializable(package="ncps", name="LTCCell")
 class LTCCell(tf.keras.layers.AbstractRNNCell):
@@ -114,28 +111,11 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
 
     @property
     def motor_size(self):
-        
-        if isinstance(self._wiring.output_dim, ncps.tf.ltc_cell.LTCCell):
-            return list(self.findkeys(self._wiring.output_dim.get_config(),'output_dim'))[-1]
-        else:
-            return self._wiring.output_dim
+        return self._wiring.output_dim
 
     @property
     def output_size(self):
         return self.motor_size
-        
-        
-    def findkeys(self,node, kv):
-        if isinstance(node, list):
-            for i in node:
-                for x in findkeys(i, kv):
-                    yield x
-        elif isinstance(node, dict):
-            if kv in node:
-                yield node[kv]
-            for j in node.values():
-                for x in findkeys(j, kv):
-                    yield x
 
     def _get_initializer(self, param_name):
         minval, maxval = self._init_ranges[param_name]
@@ -268,76 +248,6 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
             )
         self.built = True
 
-    def _sigmoid(self, v_pre, mu, sigma):
-        v_pre = tf.expand_dims(v_pre, axis=-1)  # For broadcasting
-        mues = v_pre - mu
-        x = sigma * mues
-        return tf.nn.sigmoid(x)
-
-    def _ode_solver(self, inputs, state, elapsed_time):
-        v_pre = state
-
-        # We can pre-compute the effects of the sensory neurons here
-        sensory_w_activation = self._params["sensory_w"] * self._sigmoid(
-            inputs, self._params["sensory_mu"], self._params["sensory_sigma"]
-        )
-        sensory_w_activation *= self._params["sensory_sparsity_mask"]
-
-        sensory_rev_activation = sensory_w_activation * self._params["sensory_erev"]
-
-        # Reduce over dimension 1 (=source sensory neurons)
-        w_numerator_sensory = tf.reduce_sum(sensory_rev_activation, axis=1)
-        w_denominator_sensory = tf.reduce_sum(sensory_w_activation, axis=1)
-
-        # cm/t is loop invariant
-        cm_t = self._params["cm"] / tf.cast(
-            elapsed_time / self._ode_unfolds, dtype=tf.float32
-        )
-
-        # Unfold the multiply ODE multiple times into one RNN step
-        for t in range(self._ode_unfolds):
-            w_activation = self._params["w"] * self._sigmoid(
-                v_pre, self._params["mu"], self._params["sigma"]
-            )
-
-            w_activation *= self._params["sparsity_mask"]
-
-            rev_activation = w_activation * self._params["erev"]
-
-            # Reduce over dimension 1 (=source neurons)
-            w_numerator = tf.reduce_sum(rev_activation, axis=1) + w_numerator_sensory
-            w_denominator = tf.reduce_sum(w_activation, axis=1) + w_denominator_sensory
-
-            numerator = (
-                cm_t * v_pre
-                + self._params["gleak"] * self._params["vleak"]
-                + w_numerator
-            )
-            denominator = cm_t + self._params["gleak"] + w_denominator
-
-            # Avoid dividing by 0
-            v_pre = numerator / (denominator + self._epsilon)
-
-        return v_pre
-
-    def _map_inputs(self, inputs):
-        if self._input_mapping in ["affine", "linear"]:
-            inputs = inputs * self._params["input_w"]
-        if self._input_mapping == "affine":
-            inputs = inputs + self._params["input_b"]
-        return inputs
-
-    def _map_outputs(self, state):
-        output = state
-        if self.motor_size < self.state_size:
-            output = output[:, 0 : self.motor_size]
-
-        if self._output_mapping in ["affine", "linear"]:
-            output = output * self._params["output_w"]
-        if self._output_mapping == "affine":
-            output = output + self._params["output_b"]
-        return output
-
     def call(self, inputs, states):
         if isinstance(inputs, (tuple, list)):
             # Irregularly sampled mode
@@ -352,7 +262,72 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
         outputs = self._map_outputs(next_state)
 
         return outputs, [next_state]
-    """
+    
+    def _sigmoid(self, v_pre, mu, sigma):
+        v_pre = tf.expand_dims(v_pre, axis=-1)  # For broadcasting
+        mues = tf.subtract(v_pre , mu)
+        x = tf.multiply(sigma ,mues)
+        return tf.nn.sigmoid(x)
+
+    def _ode_solver(self, inputs, state, elapsed_time):
+        v_pre = state
+        # We can pre-compute the effects of the sensory neurons here
+        sensory_w_activation = tf.multiply(tf.multiply(self._params["sensory_w"],
+                                self._sigmoid(inputs,self._params["sensory_mu"],self._params["sensory_sigma"])),
+                                self._params["sensory_sparsity_mask"])
+        sensory_rev_activation = tf.multiply(sensory_w_activation , self._params["sensory_erev"])
+        # Reduce over dimension 1 (=source sensory neurons)
+        w_numerator_sensory = tf.reduce_sum(sensory_rev_activation, axis=1)
+        w_denominator_sensory = tf.reduce_sum(sensory_w_activation, axis=1)
+
+        # cm/t is loop invariant
+        cm_t = tf.divide(self._params["cm"] , tf.divide( elapsed_time, self._ode_unfolds) )
+
+        # Unfold the multiply ODE multiple times into one RNN step
+        for t in range(self._ode_unfolds):
+           
+            w_activation =tf.multiply(tf.multiply( self._params["w"] , 
+                self._sigmoid(v_pre, self._params["mu"], self._params["sigma"])),
+                self._params["sparsity_mask"])
+
+            rev_activation = tf.multiply(w_activation , self._params["erev"])
+
+            w_numerator = tf.add(tf.reduce_sum(rev_activation, axis=1) , w_numerator_sensory)
+            w_denominator = tf.add(tf.reduce_sum(w_activation, axis=1) , w_denominator_sensory)
+            
+            a=tf.multiply(self._params["gleak"], self._params["vleak"])
+            b=tf.multiply(cm_t, v_pre)
+            z=tf.add(a,b)
+            numerator = tf.add(z, w_numerator)
+
+            q=tf.add(cm_t , self._params["gleak"])
+
+            denominator = tf.add(q, w_denominator)
+ 
+            # Avoid dividing by 0
+            d=tf.add(denominator , self._epsilon,name="epsilom")
+            v_pre = tf.divide(numerator , d)
+            v_pre = tf.ensure_shape(v_pre, [None, self.state_size])
+        return v_pre
+
+    def _map_inputs(self, inputs):
+        if self._input_mapping in ["affine", "linear"]:
+            inputs = tf.multiply(inputs , self._params["input_w"])
+        if self._input_mapping == "affine":
+            inputs = tf.add(inputs , self._params["input_b"])
+        return inputs
+
+    def _map_outputs(self, state):
+        output = state
+        if self.motor_size < self.state_size:
+            output = tf.slice(output, [0, 0], [-1,self.motor_size])
+        if self._output_mapping in ["affine", "linear"]:
+            output = tf.multiply( output , self._params["output_w"])
+        if self._output_mapping == "affine": 
+            output = tf.add(output,self._params["output_b"]) 
+        return output    
+    
+   
     def get_config(self):
         seralized = self._wiring.get_config()
         seralized["input_mapping"] = self._input_mapping
@@ -363,22 +338,10 @@ class LTCCell(tf.keras.layers.AbstractRNNCell):
 
     @classmethod
     def from_config(cls, config):
-        wiring = wirings.Wiring.from_config(config)
-        return cls(wiring=wiring, **config)
-        
-    """        
-    def get_config(self):
-        config = {
-            "wiring": tf.keras.utils.serialize_keras_object(self._wiring),
-            "input_mapping": self._input_mapping,
-            "output_mapping": self._output_mapping,
-            "ode_unfolds": self._ode_unfolds,
-            "epsilon": self._epsilon,
-        }
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-    @classmethod
-    def from_config(cls, config):
-        wiring = tf.keras.utils.deserialize_keras_object(config.pop("wiring"))
-        return cls(wiring=wiring, **config)
+        wiring = wirings.Wiring.from_config(config) 
+        param={}
+        param["input_mapping"]=config["input_mapping"]
+        param["output_mapping"] = config["output_mapping"]
+        param["ode_unfolds"] = config["ode_unfolds"]
+        param["epsilon"] = config["epsilon"]
+        return cls(wiring=wiring, **param)
