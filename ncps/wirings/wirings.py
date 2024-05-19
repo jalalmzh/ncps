@@ -1,3 +1,4 @@
+
 # Copyright 2020-2021 Mathias Lechner
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,12 +16,13 @@
 
 import numpy as np
 import ncps
-import tensorflow as tf
+from pprint import pprint
+
 
 class Wiring:
     def __init__(self, units):
         if isinstance(units, ncps.tf.ltc_cell.LTCCell):
-            self.units=units.get_config()['wiring']['config']['units']   
+            self.units=units.get_config()['units']   
         else:
             self.units=units
         self.adjacency_matrix = np.zeros([self.units, self.units], dtype=np.int32)
@@ -61,7 +63,10 @@ class Wiring:
         )
 
     def set_output_dim(self, output_dim):
-        self.output_dim = output_dim
+        if isinstance(output_dim, ncps.tf.ltc_cell.LTCCell):
+            self.output_dim=output_dim.get_config()['output_dim']   
+        else:
+            self.output_dim = output_dim
 
     # May be overwritten by child class
     def get_type_of_neuron(self, neuron_id):
@@ -114,14 +119,13 @@ class Wiring:
         self.sensory_adjacency_matrix[src, dest] = polarity
 
     def get_config(self):
-        return{
+        return {
             "adjacency_matrix": self.adjacency_matrix,
             "sensory_adjacency_matrix": self.sensory_adjacency_matrix,
             "input_dim": self.input_dim,
             "output_dim": self.output_dim,
             "units": self.units,
         }
-        
 
     @classmethod
     def from_config(cls, config):
@@ -135,6 +139,10 @@ class Wiring:
         return wiring
 
     def get_graph(self, include_sensory_neurons=True):
+        """
+        Returns a networkx.DiGraph object of the wiring diagram
+        :param include_sensory_neurons: Whether to include the sensory neurons as nodes in the graph
+        """
         if not self.is_built():
             raise ValueError(
                 "Wiring is not built yet.\n"
@@ -179,10 +187,12 @@ class Wiring:
 
     @property
     def synapse_count(self):
+        """Counts the number of synapses between internal neurons of the model"""
         return np.sum(np.abs(self.adjacency_matrix))
 
     @property
     def sensory_synapse_count(self):
+        """Counts the number of synapses from the inputs (sensory neurons) to the internal neurons of the model"""
         return np.sum(np.abs(self.sensory_adjacency_matrix))
 
     def draw_graph(
@@ -191,7 +201,24 @@ class Wiring:
         neuron_colors=None,
         synapse_colors=None,
         draw_labels=False,
-        ):
+    ):
+        """Draws a matplotlib graph of the wiring structure
+        Examples::
+
+            >>> import matplotlib.pyplot as plt
+            >>> plt.figure(figsize=(6, 4))
+            >>> legend_handles = wiring.draw_graph(draw_labels=True)
+            >>> plt.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(1, 1))
+            >>> plt.tight_layout()
+            >>> plt.show()
+
+        :param layout:
+        :param neuron_colors:
+        :param synapse_colors:
+        :param draw_labels:
+        :return:
+        """
+
         # May switch to Cytoscape once support in Google Colab is available
         # https://stackoverflow.com/questions/62421021/how-do-i-install-cytoscape-on-google-colab
         import networkx as nx
@@ -271,7 +298,6 @@ class Wiring:
 
         return legend_patches
 
-tf.keras.utils.get_custom_objects()['Wiring'] = Wiring
 
 class FullyConnected(Wiring):
     def __init__(
@@ -297,7 +323,6 @@ class FullyConnected(Wiring):
                 polarity = self._rng.choice([-1, 1, 1])
                 self.add_sensory_synapse(src, dest, polarity)
 
-tf.keras.utils.get_custom_objects()['FullyConnected'] = FullyConnected
 
 class Random(Wiring):
     def __init__(self, units, output_dim=None, sparsity_level=0.0, random_seed=1111):
@@ -360,6 +385,20 @@ class NCP(Wiring):
         motor_fanin,
         seed=22222,
     ):
+        """
+        Creates a Neural Circuit Policies wiring.
+        The total number of neurons (= state size of the RNN) is given by the sum of inter, command, and motor neurons.
+        For an easier way to generate a NCP wiring see the ``AutoNCP`` wiring class.
+
+        :param inter_neurons: The number of inter neurons (layer 2)
+        :param command_neurons: The number of command neurons (layer 3)
+        :param motor_neurons: The number of motor neurons (layer 4 = number of outputs)
+        :param sensory_fanout: The average number of outgoing synapses from the sensory to the inter neurons
+        :param inter_fanout: The average number of outgoing synapses from the inter to the command neurons
+        :param recurrent_command_synapses: The average number of recurrent connections in the command neuron layer
+        :param motor_fanin: The average number of incoming synapses of the motor neurons from the command neurons
+        :param seed: The random seed used to generate the wiring
+        """
 
         super(NCP, self).__init__(inter_neurons + command_neurons + motor_neurons)
         self.set_output_dim(motor_neurons)
